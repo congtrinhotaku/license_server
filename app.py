@@ -2,58 +2,107 @@ import os
 import hashlib
 from flask import Flask, request, jsonify
 import psycopg2
+import psycopg2.extras
 
 app = Flask(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
+# =========================
+# KẾT NỐI DATABASE
+# =========================
 def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
+
+# =========================
+# HASH MACHINE ID
+# =========================
 def hash_machine(machine_id):
     return hashlib.sha256(machine_id.encode()).hexdigest()
 
+
+# =========================
+# TEST SERVER
+# =========================
 @app.route("/")
 def home():
-    return "License Server Running"
+    return "License Server Running OK"
 
+
+# =========================
+# VERIFY LICENSE
+# =========================
 @app.route("/verify", methods=["POST"])
 def verify():
-    data = request.json
+    data = request.get_json()
+
     key = data.get("key")
     machine_id = data.get("machine_id")
 
     if not key or not machine_id:
-        return jsonify({"status": "error", "message": "Thiếu dữ liệu"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "Thiếu key hoặc machine_id"
+        }), 400
 
     machine_hash = hash_machine(machine_id)
 
     conn = get_connection()
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-    cur.execute("SELECT machine_id FROM licenses WHERE license_key=%s", (key,))
+    cur.execute(
+        "SELECT machine_id FROM licenses WHERE license_key=%s",
+        (key,)
+    )
+
     result = cur.fetchone()
 
+    # Key không tồn tại
     if not result:
-        return jsonify({"status": "invalid", "message": "Key không tồn tại"}), 403
+        cur.close()
+        conn.close()
+        return jsonify({
+            "status": "invalid",
+            "message": "Key không tồn tại"
+        }), 403
 
-    saved_machine = result[0]
+    saved_machine = result["machine_id"]
 
-    # Nếu chưa kích hoạt
+    # Chưa kích hoạt
     if saved_machine is None:
         cur.execute(
             "UPDATE licenses SET machine_id=%s WHERE license_key=%s",
             (machine_hash, key)
         )
         conn.commit()
-        return jsonify({"status": "activated", "message": "Kích hoạt thành công"})
+        cur.close()
+        conn.close()
 
-    # Nếu đã dùng rồi
+        return jsonify({
+            "status": "activated",
+            "message": "Kích hoạt thành công"
+        })
+
+    # Đã kích hoạt đúng máy
     if saved_machine == machine_hash:
-        return jsonify({"status": "valid", "message": "Key hợp lệ"})
+        cur.close()
+        conn.close()
 
-    return jsonify({"status": "used", "message": "Key đã dùng trên máy khác"}), 403
+        return jsonify({
+            "status": "valid",
+            "message": "Key hợp lệ"
+        })
+
+    # Đã dùng máy khác
+    cur.close()
+    conn.close()
+    return jsonify({
+        "status": "used",
+        "message": "Key đã được dùng trên máy khác"
+    }), 403
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=8080)
